@@ -1,1 +1,30 @@
-node_modules
+# Dependencias
+node_modules/
+
+# Builds y artefactos
+dist/
+coverage/
+.vite/
+.vitest/
+
+# Archivos temporales y registros
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Archivos locales y de entorno
+.env
+.env.*
+*.local
+
+# Configuración de editores/IDE
+.vscode/
+.idea/
+
+# Sistemas operativos
+.DS_Store
+Thumbs.db
+
+# Salida de TypeScript
+*.tsbuildinfo
