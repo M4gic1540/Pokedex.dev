@@ -1,0 +1,438 @@
+import type {
+  EvolutionStep,
+  PokemonListFilters,
+  PokemonListParams,
+  PokemonListResult,
+  PokemonStat,
+  PokemonSummary,
+  StatFilter
+} from '../types/pokemon'
+
+const API_BASE_URL = 'https://pokeapi.co/api/v2'
+const MAX_POKEMON = 386
+
+interface RawPokemonListResponse {
+  results: Array<{ name: string; url: string }>
+}
+
+interface RawPokemon {
+  id: number
+  name: string
+  sprites: {
+    front_default: string | null
+    other?: Record<string, { front_default?: string | null }>
+  }
+  stats: Array<{ base_stat: number; stat: { name: string } }>
+  types: Array<{ slot: number; type: { name: string } }>
+  abilities: Array<{ ability: { name: string }; is_hidden: boolean }>
+  height: number
+  weight: number
+}
+
+export const buildArtworkUrl = (id: number) =>
+  `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png`
+
+export const extractIdFromUrl = (url: string): number => {
+  const match = url.match(/\/(\d+)\/?$/)
+  if (!match) throw new Error(`No se pudo extraer el ID de ${url}`)
+  return Number.parseInt(match[1], 10)
+}
+
+const normalizeStat = ({ base_stat: value, stat }: RawPokemon['stats'][0]): PokemonStat => ({
+  name: stat.name,
+  value
+})
+
+const computeGeneration = (id: number): number => {
+  if (id <= 151) return 1
+  if (id <= 251) return 2
+  return 3
+}
+
+const normalizePokemon = (raw: RawPokemon): PokemonSummary => {
+  const artwork = raw.sprites.other?.['official-artwork']?.front_default ?? raw.sprites.front_default
+
+  return {
+    id: raw.id,
+    name: raw.name,
+    image: artwork ?? buildArtworkUrl(raw.id),
+    types: raw.types
+      .sort((a, b) => a.slot - b.slot)
+      .map((entry) => entry.type.name),
+    height: raw.height,
+    weight: raw.weight,
+    abilities: raw.abilities.map((entry) => entry.ability.name),
+    stats: raw.stats.map(normalizeStat),
+    generation: computeGeneration(raw.id)
+  }
+}
+
+let allPokemonCache: PokemonSummary[] | null = null
+let allPokemonPromise: Promise<PokemonSummary[]> | null = null
+
+const loadAllPokemonSummaries = async (): Promise<PokemonSummary[]> => {
+  if (allPokemonCache) return allPokemonCache
+  if (allPokemonPromise) return await allPokemonPromise
+
+  allPokemonPromise = (async () => {
+    const chunkSize = 60
+    const all: PokemonSummary[] = []
+
+    for (let offset = 0; offset < MAX_POKEMON; offset += chunkSize) {
+      const limit = Math.min(chunkSize, MAX_POKEMON - offset)
+      const listUrl = `${API_BASE_URL}/pokemon?limit=${limit}&offset=${offset}`
+      const data = await fetchJson<RawPokemonListResponse>(listUrl)
+      const details = await Promise.all(data.results.map(async ({ url }) => await fetchPokemonDetails(url)))
+      all.push(...details)
+    }
+
+    allPokemonCache = all.sort((a, b) => a.id - b.id)
+    return allPokemonCache
+  })()
+
+  const result = await allPokemonPromise
+  return result
+}
+
+const matchesSearch = (pokemon: PokemonSummary, term: string): boolean => {
+  const normalized = term.trim().toLowerCase()
+  if (!normalized) return true
+  if (pokemon.name.toLowerCase().includes(normalized)) return true
+  if (pokemon.types.some((type) => type.toLowerCase().includes(normalized))) return true
+  const idString = pokemon.id.toString()
+  return idString.startsWith(normalized)
+}
+
+const matchesTypes = (pokemon: PokemonSummary, types?: string[]): boolean => {
+  if (!types || types.length === 0) return true
+  return types.every((type) => pokemon.types.includes(type))
+}
+
+const matchesGeneration = (pokemon: PokemonSummary, generation?: number | null): boolean => {
+  if (!generation) return true
+  return pokemon.generation === generation
+}
+
+const matchesStatFilter = (pokemon: PokemonSummary, statFilter?: StatFilter | null): boolean => {
+  if (!statFilter || !statFilter.name) return true
+  const stat = pokemon.stats.find((entry) => entry.name === statFilter.name)
+  if (!stat) return false
+  const meetsMin = statFilter.min == null || stat.value >= statFilter.min
+  const meetsMax = statFilter.max == null || stat.value <= statFilter.max
+  return meetsMin && meetsMax
+}
+
+const applyFilters = (pokemon: PokemonSummary, filters?: PokemonListFilters): boolean => {
+  if (!filters) return true
+  const { search, types, generation, statFilter } = filters
+  return (
+    matchesSearch(pokemon, search ?? '') &&
+    matchesTypes(pokemon, types) &&
+    matchesGeneration(pokemon, generation) &&
+    matchesStatFilter(pokemon, statFilter)
+  )
+}
+
+const fetchJson = async <T>(url: string): Promise<T> => {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`Error al obtener datos (${response.status})`)
+  }
+  return await response.json()
+}
+
+const fetchPokemonDetails = async (url: string): Promise<PokemonSummary> => {
+  const raw = await fetchJson<RawPokemon>(url)
+  return normalizePokemon(raw)
+}
+
+export const fetchPokemonList = async ({ page, pageSize, filters }: PokemonListParams): Promise<PokemonListResult> => {
+  const safePage = Math.max(page, 0)
+  const safePageSize = Math.max(pageSize, 1)
+  const filtersActive = Boolean(
+    filters && (
+      (filters.search && filters.search.trim() !== '') ||
+      (filters.types && filters.types.length > 0) ||
+      (filters.generation && filters.generation > 0) ||
+      (filters.statFilter && filters.statFilter.name)
+    )
+  )
+
+  if (filtersActive) {
+    const all = await loadAllPokemonSummaries()
+    const filtered = all.filter((pokemon) => applyFilters(pokemon, filters))
+    const total = filtered.length
+    const start = safePage * safePageSize
+    const items = filtered.slice(start, start + safePageSize)
+
+    return {
+      items,
+      total,
+      page: safePage,
+      pageSize: safePageSize
+    }
+  }
+
+  const offset = safePage * safePageSize
+  if (offset >= MAX_POKEMON) {
+    return {
+      items: [],
+      total: MAX_POKEMON,
+      page: safePage,
+      pageSize: safePageSize
+    }
+  }
+
+  const cappedLimit = Math.min(safePageSize, MAX_POKEMON - offset)
+  const listUrl = `${API_BASE_URL}/pokemon?limit=${cappedLimit}&offset=${offset}`
+  const data = await fetchJson<RawPokemonListResponse>(listUrl)
+
+  const items = await Promise.all(
+    data.results.map(async ({ url }) => {
+      const id = extractIdFromUrl(url)
+      const pokemonUrl = `${API_BASE_URL}/pokemon/${id}`
+      return await fetchPokemonDetails(pokemonUrl)
+    })
+  )
+
+  return {
+    items,
+    total: MAX_POKEMON,
+    page: safePage,
+    pageSize: safePageSize
+  }
+}
+
+export const fetchPokemonByName = async (term: string): Promise<PokemonSummary> => {
+  const normalizedTerm = term.trim().toLowerCase()
+  if (!normalizedTerm) {
+    throw new Error('El término de búsqueda no puede estar vacío')
+  }
+  const url = `${API_BASE_URL}/pokemon/${normalizedTerm}`
+  const raw = await fetchJson<RawPokemon>(url)
+  return normalizePokemon(raw)
+}
+
+export const searchPokemonSuggestions = async (term: string, limit = 10): Promise<PokemonSummary[]> => {
+  const normalizedTerm = term.trim().toLowerCase()
+  if (normalizedTerm.length < 2) return []
+  const all = await loadAllPokemonSummaries()
+  return all
+    .filter((pokemon) => matchesSearch(pokemon, normalizedTerm))
+    .slice(0, limit)
+}
+
+interface RawPokemonSpecies {
+  evolution_chain: { url: string }
+  habitat: { name: string } | null
+  generation: { name: string }
+}
+
+interface RawEvolutionChainLink {
+  species: { name: string; url: string }
+  evolution_details: Array<{
+    trigger: { name: string }
+    min_level: number | null
+    item: { name: string } | null
+    held_item: { name: string } | null
+    time_of_day: string
+    min_happiness: number | null
+    min_affection: number | null
+    min_beauty: number | null
+    location: { name: string } | null
+    needs_overworld_rain: boolean
+    turn_upside_down: boolean
+    relative_physical_stats: number | null
+    gender: number | null
+    known_move: { name: string } | null
+    known_move_type: { name: string } | null
+  }>
+  evolves_to: RawEvolutionChainLink[]
+}
+
+interface RawEvolutionChain {
+  id: number
+  chain: RawEvolutionChainLink
+}
+
+const describeEvolutionDetail = (detail: RawEvolutionChainLink['evolution_details'][number]): string[] => {
+  const conditions: string[] = []
+
+  if (detail.min_level) {
+    conditions.push(`Nivel ${detail.min_level}`)
+  }
+  if (detail.item) {
+    conditions.push(`Item: ${detail.item.name}`)
+  }
+  if (detail.held_item) {
+    conditions.push(`Objeto equipado: ${detail.held_item.name}`)
+  }
+  if (detail.location) {
+    conditions.push(`Ubicación: ${detail.location.name}`)
+  }
+  if (detail.time_of_day && detail.time_of_day !== '') {
+    conditions.push(`Momento del día: ${detail.time_of_day}`)
+  }
+  if (detail.min_happiness) {
+    conditions.push(`Amistad mínima: ${detail.min_happiness}`)
+  }
+  if (detail.min_beauty) {
+    conditions.push(`Belleza mínima: ${detail.min_beauty}`)
+  }
+  if (detail.min_affection) {
+    conditions.push(`Afecto mínimo: ${detail.min_affection}`)
+  }
+  if (detail.needs_overworld_rain) {
+    conditions.push('Lluvia en el mapa')
+  }
+  if (detail.turn_upside_down) {
+    conditions.push('Consola invertida')
+  }
+  if (detail.relative_physical_stats !== null) {
+    const relation = detail.relative_physical_stats === 1 ? 'Ataque > Defensa' : 'Ataque < Defensa'
+    conditions.push(`Estadísticas: ${relation}`)
+  }
+  if (detail.gender !== null) {
+    conditions.push(`Género: ${detail.gender === 1 ? 'Hembra' : 'Macho'}`)
+  }
+  if (detail.known_move) {
+    conditions.push(`Movimiento: ${detail.known_move.name}`)
+  }
+  if (detail.known_move_type) {
+    conditions.push(`Tipo de movimiento: ${detail.known_move_type.name}`)
+  }
+
+  return conditions
+}
+
+const flattenEvolutionChain = (
+  link: RawEvolutionChainLink,
+  accumulator: EvolutionStep[] = [],
+  incomingDetail: RawEvolutionChainLink['evolution_details'][number] | null = null
+) => {
+  const id = extractIdFromUrl(link.species.url)
+  const trigger = incomingDetail?.trigger?.name ?? 'Inicio'
+  const step: EvolutionStep = {
+    id,
+    name: link.species.name,
+    trigger,
+    minLevel: incomingDetail?.min_level ?? null,
+    conditions: incomingDetail ? describeEvolutionDetail(incomingDetail) : undefined,
+    image: buildArtworkUrl(id)
+  }
+
+  accumulator.push(step)
+
+  for (const child of link.evolves_to) {
+    if (child.evolution_details.length === 0) {
+      flattenEvolutionChain(child, accumulator, null)
+      continue
+    }
+
+    for (const detail of child.evolution_details) {
+      flattenEvolutionChain(child, accumulator, detail)
+    }
+  }
+
+  return accumulator
+}
+
+export const fetchEvolutionTimeline = async (name: string): Promise<EvolutionStep[]> => {
+  const normalizedName = name.trim().toLowerCase()
+  if (!normalizedName) throw new Error('Debes indicar un Pokémon válido')
+
+  const speciesUrl = `${API_BASE_URL}/pokemon-species/${normalizedName}`
+  const species = await fetchJson<RawPokemonSpecies>(speciesUrl)
+  const chain = await fetchJson<RawEvolutionChain>(species.evolution_chain.url)
+
+  const timeline = flattenEvolutionChain(chain.chain)
+
+  // Garantiza orden por aparición en la cadena
+  const uniqueById = new Map<number, EvolutionStep>()
+  timeline.forEach((step) => {
+    if (!uniqueById.has(step.id)) {
+      uniqueById.set(step.id, { ...step, conditions: step.conditions ?? undefined })
+    } else if (step.conditions?.length) {
+      const existing = uniqueById.get(step.id)!
+      uniqueById.set(step.id, {
+        ...existing,
+        conditions: Array.from(new Set([...(existing.conditions ?? []), ...step.conditions]))
+      })
+    }
+  })
+
+  return Array.from(uniqueById.values())
+}
+
+interface RawTypeResponse {
+  pokemon: Array<{
+    pokemon: { name: string; url: string }
+    slot: number
+  }>
+}
+
+const fetchPokemonByType = async (type: string): Promise<string[]> => {
+  const normalizedType = type.trim().toLowerCase()
+  const url = `${API_BASE_URL}/type/${normalizedType}`
+  const data = await fetchJson<RawTypeResponse>(url)
+  return data.pokemon.map((entry) => entry.pokemon.name)
+}
+
+const FALLBACK_TEAM = ['pikachu', 'charizard', 'blastoise', 'venusaur', 'gengar', 'dragonite']
+
+export const recommendTeamByTypes = async (types: string[]): Promise<PokemonSummary[]> => {
+  const sanitizedTypes = types.map((type) => type.trim().toLowerCase()).filter(Boolean)
+  const pools: string[][] = []
+
+  if (sanitizedTypes.length === 0) {
+    pools.push(FALLBACK_TEAM)
+  } else {
+    const results = await Promise.allSettled(sanitizedTypes.map(async (type) => await fetchPokemonByType(type)))
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        pools.push(result.value)
+      }
+    }
+  }
+
+  if (pools.length === 0) {
+    pools.push(FALLBACK_TEAM)
+  }
+
+  const candidates = Array.from(new Set(pools.flat())).slice(0, 60)
+
+  const team: PokemonSummary[] = []
+
+  for (const name of candidates) {
+    try {
+      const pokemon = await fetchPokemonByName(name)
+      if (team.some((member) => member.id === pokemon.id)) continue
+      team.push(pokemon)
+      if (team.length === 6) break
+    } catch (error) {
+      // ignorar y seguir con el siguiente candidato
+    }
+  }
+
+  if (team.length < 6) {
+    for (const fallbackName of FALLBACK_TEAM) {
+      if (team.length === 6) break
+      if (team.some((member) => member.name === fallbackName)) continue
+      try {
+        const pokemon = await fetchPokemonByName(fallbackName)
+        team.push(pokemon)
+      } catch (error) {
+        // ignorar
+      }
+    }
+  }
+
+  return team
+}
+
+export const fetchRandomPokemonSummary = async (): Promise<PokemonSummary> => {
+  const randomId = Math.floor(Math.random() * MAX_POKEMON) + 1
+  const url = `${API_BASE_URL}/pokemon/${randomId}`
+  const raw = await fetchJson<RawPokemon>(url)
+  return normalizePokemon(raw)
+}

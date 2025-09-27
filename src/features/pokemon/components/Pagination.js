@@ -1,0 +1,6 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+export const Pagination = ({ page, totalPages, onPageChange, isLoading = false }) => {
+    const canGoBack = page > 0;
+    const canGoForward = page < totalPages - 1;
+    return (_jsxs("div", { className: "flex items-center justify-between gap-4 border-t border-slate-800 pt-6", children: [_jsx("button", { type: "button", className: "rounded-md border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500", onClick: () => onPageChange(page - 1), disabled: !canGoBack || isLoading, children: "Anterior" }), _jsxs("div", { className: "text-sm text-slate-400", children: ["P\u00E1gina ", _jsx("span", { className: "text-slate-100", children: page + 1 }), " de ", _jsx("span", { className: "text-slate-100", children: totalPages })] }), _jsx("button", { type: "button", className: "rounded-md border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500", onClick: () => onPageChange(page + 1), disabled: !canGoForward || isLoading, children: "Siguiente" })] }));
+};
